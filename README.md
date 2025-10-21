@@ -5,23 +5,22 @@
 
 **Automated Docker Deployment Script**
 
-StackDeployer is a **Bash automation framework** built to streamline the process of deploying **Dockerized applications** onto a **remote Linux server** using a single command.
-This script eliminates repetitive setup steps — automating Git repository cloning, remote server preparation, Docker installation, container deployment, and log validation.
+**StackDeployer** is a lightweight Bash-based deployment automation script designed to streamline the process of pushing web applications to a remote Linux server (e.g., AWS EC2).  
+It abstracts repetitive DevOps tasks like syncing source code, setting up the environment, managing services (like Nginx and Docker), and verifying live deployments — all through a single execution command.
 
 ---
 
-## 🧠 Project Overview
+## 🧭 Project Overview
 
-This project was developed as part of the **HNG DevOps Stage 1 Task**, which focused on building a **production-ready Bash script** capable of:
+Modern deployments often require engineers to juggle SSH, Docker, and web server configurations repeatedly.  
+**StackDeployer** simplifies that process by providing an automated, environment-driven deployment workflow — ideal for small teams, personal projects, or student DevOps challenges.
 
-* Collecting user inputs (GitHub repo, branch, SSH details, PAT)
-* Installing Docker and Docker Compose (if missing)
-* Authenticating via **Personal Access Token (PAT)**
-* Deploying the project to a remote Linux server
-* Configuring and validating the running application
-* Handling errors, logs, and cleanup actions gracefully
+It assumes:
+- You already have a running **Nginx** instance configured as a reverse proxy.
+- The target server is **Ubuntu-based**, accessible via **SSH**.
+- Docker is installed and running on the target host.
 
-The end result is a **fully automated deployment pipeline**, capable of running anywhere Bash and SSH are supported.
+---
 
 ---
 
@@ -31,7 +30,7 @@ StackDeployer automates the full cycle of deploying a containerized application 
 It follows a simple yet production-grade design pattern based on modular shell functions and environment-based configuration.
 
 
-### 🧭 Core Workflow
+### 🧭 Architecture Workflow
 
 ```text
 +-------------------------+                +---------------------------+
@@ -49,8 +48,43 @@ It follows a simple yet production-grade design pattern based on modular shell f
                      |                              User Access
                      +--------------------------- HTTP/HTTPS ------------------>
 
-
 ```
+
+## Design Principles
+- **Idempotent Deployment:** Running the script multiple times won’t break the environment.
+- **Minimal Dependencies:** Only `bash`, `rsync`, `ssh`, and `docker` are required.
+- **Environment-Aware:** Sensitive credentials (e.g., server IP, username, port) are stored in a `.env` file.
+- **Fast Rollout:** No manual Nginx configuration required — assumes an existing reverse proxy setup.
+
+
+
+---
+
+## ⚙️ Core Workflow
+
+1. **Load Configuration**
+   - The script reads from `.env` to extract variables like `SSH_HOST`, `SSH_USER`, and `PAT`.
+
+2. **Pre-Deployment Checks**
+   - Verifies SSH connectivity and Docker availability.
+   - Ensures `.env` is valid and executable permissions are set.
+
+3. **Sync Files**
+   - Uses `rsync` to copy the project directory from local to remote.
+   - Only changed files are transferred for efficiency.
+
+4. **Remote Deployment**
+   - Connects to the EC2 instance via SSH.
+   - Pulls or builds Docker images as needed.
+   - Restarts containers (if applicable) to reflect the latest updates.
+
+5. **Verification**
+   - Confirms the app is running on the correct port.
+   - Checks that the Nginx service is active (skipped if already verified live).
+
+6. **Completion**
+   - Prints a success message with the deployment timestamp and URL.
+  
 ---
 
 ## ⚙️ Prerequisites
@@ -79,7 +113,19 @@ Before running the script, ensure the following:
 
 ---
 
-## 🛠️ Setup Instructions
+## 🛠️ Setup 
+
+### Prerequisites
+Ensure the following are installed on your **local** machine:
+- Bash 5.x or higher
+- OpenSSH client
+- Rsync
+- Docker (for local testing)
+
+Ensure the **remote** server has:
+- Docker Engine installed and active
+- Nginx pre-configured (already serving requests)
+- OpenSSH enabled and accessible
 
 ### 1️⃣ Clone the StackDeployer Repository
 
@@ -254,7 +300,7 @@ Feel free to modify and use in your own DevOps workflows.
 
 **Ibrahim Yusuf (Tory)**
 President – NACSS Osun State University
-Cybersecurity & DevSecOps Enthusiast | HNG DevOps Intern
+Certified in Cybersecurity (ISC² CC) | SC-200 | Cloud & DevSecOps Enthusiast
 
 GitHub: [@KoredeSec](https://github.com/KoredeSec)
 Medium: [Ibrahim Yusuf](https://medium.com/@KoredeSec)
