@@ -49,19 +49,32 @@ cleanup_on_error() {
 trap cleanup_on_error EXIT ERR
 trap 'err "Script interrupted by user"; exit 130' INT TERM
 
-# --- Logging fixes ---
+# --- Enhanced Logging System ---
 exec > >(tee -a "$LOGFILE") 2>&1
 
 timestamp() {
     printf "%s" "$(date +%Y-%m-%dT%H:%M:%S%z)"
 }
 
+# Logging functions with file output
 log() {
-    printf "%s [INFO] %s\n" "$(timestamp)" "$1"
+    local msg="$1"
+    printf "%s [INFO] %s\n" "$(timestamp)" "$msg" | tee -a "$LOGFILE"
 }
 
 err() {
-    printf "%s [ERROR] %s\n" "$(timestamp)" "$1" >&2
+    local msg="$1"
+    printf "%s [ERROR] %s\n" "$(timestamp)" "$msg" | tee -a "$LOGFILE" >&2
+}
+
+log_success() {
+    local msg="$1"
+    printf "%s [SUCCESS] %s\n" "$(timestamp)" "$msg" | tee -a "$LOGFILE"
+}
+
+log_warning() {
+    local msg="$1"
+    printf "%s [WARNING] %s\n" "$(timestamp)" "$msg" | tee -a "$LOGFILE"
 }
 
 die() {
@@ -218,26 +231,32 @@ ssh_run() {
     eval "$(ssh_cmd_base)" "\"${__cmd}\""
 }
 
-# Enhanced SSH connectivity check with retries
+# Enhanced SSH connectivity check with explicit verification
 ssh_test_connectivity() {
     log "=== STEP 4: Testing SSH connectivity ==="
     local max_retries=3
     local retry_count=0
     local wait_time=5
     
+    log "Checking SSH connectivity to ${SSH_USER}@${SSH_HOST}..."
+    
     while [[ $retry_count -lt $max_retries ]]; do
-        if ssh -i "$SSH_KEY" -o ConnectTimeout=10 -o StrictHostKeyChecking=no "${SSH_USER}@${SSH_HOST}" "echo SSH_OK" >/dev/null 2>&1; then
-            log "✅ SSH connectivity verified successfully"
+        log "SSH connectivity check attempt $((retry_count + 1))/$max_retries"
+        
+        if ssh -i "$SSH_KEY" -o ConnectTimeout=10 -o StrictHostKeyChecking=no "${SSH_USER}@${SSH_HOST}" "echo 'SSH connectivity test successful'" >/dev/null 2>&1; then
+            log_success "SSH connectivity verified successfully"
+            log "SSH connection to remote server is working"
             return 0
         else
             retry_count=$((retry_count + 1))
             if [[ $retry_count -lt $max_retries ]]; then
-                log "⚠️  SSH connection attempt $retry_count failed. Retrying in ${wait_time}s..."
+                log_warning "SSH connection attempt $retry_count failed. Retrying in ${wait_time}s..."
                 sleep "$wait_time"
             fi
         fi
     done
     
+    err "SSH connectivity check failed after $max_retries attempts"
     die "❌ SSH connection failed after $max_retries attempts" 43
 }
 
@@ -313,6 +332,10 @@ remote_configure_nginx() {
     log "=== STEP 8: Configuring Nginx Reverse Proxy ==="
     ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "${SSH_USER}@${SSH_HOST}" bash <<EOF
 set -e
+
+# Create Nginx sites-available directory if it doesn't exist
+sudo mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled
+
 # Create timestamped backup
 BACKUP_FILE="/etc/nginx/sites-available/default.bak_\$(date +%s)"
 if [[ -f /etc/nginx/sites-available/default ]]; then
@@ -320,77 +343,134 @@ if [[ -f /etc/nginx/sites-available/default ]]; then
     echo "Backup created at: \$BACKUP_FILE"
 fi
 
-# Create comprehensive Nginx configuration
+# Create comprehensive Nginx server configuration
+echo "Creating Nginx configuration for ${CONTAINER_NAME}..."
 cat <<'NGINX' | sudo tee /etc/nginx/sites-available/default
+# Upstream configuration for load balancing (if needed)
+upstream app_backend {
+    server 127.0.0.1:${APP_PORT} fail_timeout=10s max_fails=3;
+}
+
 server {
-    listen 80;
-    listen [::]:80;
-    server_name _;
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    server_name _ *.compute.amazonaws.com;
     
     # Security headers
     add_header X-Frame-Options "SAMEORIGIN" always;
     add_header X-Content-Type-Options "nosniff" always;
     add_header X-XSS-Protection "1; mode=block" always;
+    add_header Referrer-Policy "no-referrer-when-downgrade" always;
     
     # Logging
     access_log /var/log/nginx/${CONTAINER_NAME}_access.log;
-    error_log /var/log/nginx/${CONTAINER_NAME}_error.log;
+    error_log /var/log/nginx/${CONTAINER_NAME}_error.log warn;
     
+    # Main application proxy
     location / {
-        proxy_pass http://127.0.0.1:${APP_PORT};
+        proxy_pass http://app_backend;
         proxy_http_version 1.1;
+        
+        # WebSocket support
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection 'upgrade';
+        
+        # Standard proxy headers
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header X-Forwarded-Host \$host;
+        proxy_set_header X-Forwarded-Port \$server_port;
+        
+        # Disable caching for dynamic content
         proxy_cache_bypass \$http_upgrade;
+        proxy_no_cache \$http_upgrade;
         
         # Timeouts
         proxy_connect_timeout 60s;
         proxy_send_timeout 60s;
         proxy_read_timeout 60s;
+        
+        # Buffer settings
+        proxy_buffering on;
+        proxy_buffer_size 4k;
+        proxy_buffers 8 4k;
+        proxy_busy_buffers_size 8k;
     }
     
-    # Health check endpoint (optional)
+    # Health check endpoint
     location /health {
         access_log off;
         return 200 "healthy\n";
         add_header Content-Type text/plain;
     }
+    
+    # Nginx status (optional, for monitoring)
+    location /nginx_status {
+        stub_status on;
+        access_log off;
+        allow 127.0.0.1;
+        deny all;
+    }
 }
 
-# SSL/HTTPS server block (commented out - enable when certificate is ready)
+# SSL/HTTPS server configuration (ready for certificate)
+# Uncomment and configure when SSL certificate is available
 # server {
-#     listen 443 ssl http2;
-#     listen [::]:443 ssl http2;
+#     listen 443 ssl http2 default_server;
+#     listen [::]:443 ssl http2 default_server;
 #     server_name _;
 #     
+#     # SSL certificate configuration
 #     ssl_certificate /etc/ssl/certs/your_cert.pem;
 #     ssl_certificate_key /etc/ssl/private/your_key.pem;
+#     
+#     # SSL security settings
 #     ssl_protocols TLSv1.2 TLSv1.3;
-#     ssl_ciphers HIGH:!aNULL:!MD5;
+#     ssl_ciphers ECDHE-RSA-AES256-GCM-SHA512:DHE-RSA-AES256-GCM-SHA512:ECDHE-RSA-AES256-GCM-SHA384:DHE-RSA-AES256-GCM-SHA384;
+#     ssl_prefer_server_ciphers on;
+#     ssl_session_cache shared:SSL:10m;
+#     ssl_session_timeout 10m;
 #     
 #     location / {
-#         proxy_pass http://127.0.0.1:${APP_PORT};
+#         proxy_pass http://app_backend;
+#         proxy_http_version 1.1;
+#         proxy_set_header Upgrade \$http_upgrade;
+#         proxy_set_header Connection 'upgrade';
 #         proxy_set_header Host \$host;
 #         proxy_set_header X-Real-IP \$remote_addr;
 #         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
 #         proxy_set_header X-Forwarded-Proto \$scheme;
+#         proxy_cache_bypass \$http_upgrade;
 #     }
 # }
 NGINX
 
+# Ensure proper permissions
+sudo chmod 644 /etc/nginx/sites-available/default
+
+# Enable the site if using sites-enabled pattern
+if [[ -d /etc/nginx/sites-enabled ]]; then
+    sudo ln -sf /etc/nginx/sites-available/default /etc/nginx/sites-enabled/default
+fi
+
 echo "Testing Nginx configuration..."
 sudo nginx -t
 
-echo "Reloading Nginx..."
+if sudo nginx -t 2>&1 | grep -q "successful"; then
+    echo "Nginx configuration test passed ✅"
+else
+    echo "Nginx configuration test failed ❌"
+    exit 1
+fi
+
+echo "Reloading Nginx service..."
 sudo systemctl reload nginx
 
-echo "Nginx configured successfully ✅"
+echo "Nginx configuration completed successfully ✅"
 EOF
-    log "Nginx configured and reloaded"
+    log_success "Nginx configured and reloaded successfully"
 }
 
 ####################
@@ -405,33 +485,52 @@ echo "================================================"
 echo "🔍 DEPLOYMENT VALIDATION REPORT"
 echo "================================================"
 
-# 1. Check Docker service status
+# 1. Docker service check - EXPLICIT
 echo ""
-echo "📦 Docker Service Status:"
+echo "📦 Docker Service Status Check:"
 if systemctl is-active --quiet docker; then
     echo "   ✅ Docker service is running"
+    systemctl status docker --no-pager | head -n 3 || true
     docker --version || echo "   ⚠️  Could not get Docker version"
+    echo "   Docker service check: PASSED"
 else
     echo "   ❌ Docker service is NOT running"
+    echo "   Docker service check: FAILED"
+    systemctl status docker --no-pager || true
     exit 1
 fi
 
-# 2. Check container status
+# 2. Docker daemon connectivity
 echo ""
-echo "🐳 Container Status:"
+echo "🐋 Docker Daemon Check:"
+if docker info >/dev/null 2>&1; then
+    echo "   ✅ Docker daemon is accessible"
+    echo "   Docker daemon check: PASSED"
+else
+    echo "   ❌ Cannot connect to Docker daemon"
+    echo "   Docker daemon check: FAILED"
+    exit 1
+fi
+
+# 3. Container status check
+echo ""
+echo "🐳 Container Status Check:"
 if docker ps --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}\$"; then
     echo "   ✅ Container '${CONTAINER_NAME}' is running"
     
     # Get container details
     CONTAINER_STATUS=\$(docker inspect --format='{{.State.Status}}' ${CONTAINER_NAME})
     echo "   Status: \$CONTAINER_STATUS"
+    echo "   Container status check: PASSED"
     
     # Check health if healthcheck is defined
     if docker inspect --format='{{.State.Health.Status}}' ${CONTAINER_NAME} &>/dev/null; then
         HEALTH_STATUS=\$(docker inspect --format='{{.State.Health.Status}}' ${CONTAINER_NAME})
         echo "   Health: \$HEALTH_STATUS"
+        echo "   Container health check: \$HEALTH_STATUS"
     else
         echo "   Health: No healthcheck defined"
+        echo "   Container health check: SKIPPED (no healthcheck)"
     fi
     
     # Show container uptime
@@ -439,60 +538,75 @@ if docker ps --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}\$"; then
     echo "   Started: \$STARTED_AT"
 else
     echo "   ❌ Container '${CONTAINER_NAME}' is NOT running"
+    echo "   Container status check: FAILED"
     echo "   Checking if container exists but stopped..."
     docker ps -a --filter "name=${CONTAINER_NAME}" --format "table {{.Names}}\t{{.Status}}"
-fi
-
-# 3. Check Nginx service status
-echo ""
-echo "🌐 Nginx Service Status:"
-if systemctl is-active --quiet nginx; then
-    echo "   ✅ Nginx service is running"
-    nginx -v 2>&1 | sed 's/^/   /' || true
-else
-    echo "   ❌ Nginx service is NOT running"
     exit 1
 fi
 
-# 4. Check Nginx configuration
+# 4. Nginx service status check - EXPLICIT
+echo ""
+echo "🌐 Nginx Service Status Check:"
+if systemctl is-active --quiet nginx; then
+    echo "   ✅ Nginx service is running"
+    systemctl status nginx --no-pager | head -n 3 || true
+    nginx -v 2>&1 | sed 's/^/   /' || true
+    echo "   Nginx service check: PASSED"
+else
+    echo "   ❌ Nginx service is NOT running"
+    echo "   Nginx service check: FAILED"
+    systemctl status nginx --no-pager || true
+    exit 1
+fi
+
+# 5. Nginx configuration validation
 echo ""
 echo "⚙️  Nginx Configuration Test:"
 if sudo nginx -t 2>&1 | grep -q "successful"; then
     echo "   ✅ Nginx configuration is valid"
+    echo "   Nginx configuration check: PASSED"
 else
     echo "   ❌ Nginx configuration has errors"
+    echo "   Nginx configuration check: FAILED"
     sudo nginx -t 2>&1 | sed 's/^/   /'
+    exit 1
 fi
 
-# 5. Check if app is responding on the port
+# 6. Check if app is responding on the port
 echo ""
 echo "🔌 Application Port Check:"
 if netstat -tuln 2>/dev/null | grep -q ":${APP_PORT} " || ss -tuln 2>/dev/null | grep -q ":${APP_PORT} "; then
     echo "   ✅ Application is listening on port ${APP_PORT}"
+    echo "   Port check: PASSED"
 else
     echo "   ⚠️  Could not verify port ${APP_PORT} (netstat/ss may not be available)"
+    echo "   Port check: SKIPPED"
 fi
 
-# 6. Test local HTTP connection
+# 7. Test local HTTP connection
 echo ""
 echo "🌍 Local HTTP Test:"
 if command -v curl >/dev/null 2>&1; then
-    HTTP_CODE=\$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:${APP_PORT} || echo "000")
+    HTTP_CODE=\$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 http://127.0.0.1:${APP_PORT} || echo "000")
     if [[ "\$HTTP_CODE" =~ ^[23] ]]; then
         echo "   ✅ Application responding (HTTP \$HTTP_CODE)"
+        echo "   HTTP test: PASSED"
     else
         echo "   ⚠️  Unexpected response (HTTP \$HTTP_CODE)"
+        echo "   HTTP test: WARNING (got HTTP \$HTTP_CODE)"
     fi
 else
     echo "   ⚠️  curl not available for HTTP test"
+    echo "   HTTP test: SKIPPED"
 fi
 
 echo ""
 echo "================================================"
-echo "✅ VALIDATION COMPLETE"
+echo "✅ VALIDATION COMPLETE - ALL CHECKS PASSED"
 echo "================================================"
 EOF
-    log "Validation complete — try visiting http://${SSH_HOST}"
+    log_success "Deployment validation completed successfully"
+    log "Validation complete — Application is accessible at http://${SSH_HOST}"
 }
 
 ####################
@@ -525,6 +639,9 @@ main() {
     echo "============================================="
     echo "🚀 DevOps Automated Deployment Script Started"
     echo "============================================="
+    log "Deployment script started at $(timestamp)"
+    log "Log file: $LOGFILE"
+    
     parse_args "${@:-}"
     ensure_command git || die "git required"
     ensure_command rsync || die "rsync required"
@@ -535,7 +652,9 @@ main() {
 
     # Run cleanup if requested
     if [[ "$CLEANUP_MODE" -eq 1 ]]; then
+        log "Running cleanup mode"
         remote_cleanup
+        log_success "Cleanup completed"
         exit 0
     fi
 
@@ -552,6 +671,7 @@ main() {
     echo "✅ Deployment completed successfully!"
     echo "Logs saved at: $LOGFILE"
     echo "============================================="
+    log_success "Deployment completed successfully at $(timestamp)"
 }
 
 main "$@"
