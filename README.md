@@ -304,7 +304,7 @@ Certified in Cybersecurity (ISC² CC) | SC-200 | Cloud & DevSecOps Enthusiast
 
 GitHub: [@KoredeSec](https://github.com/KoredeSec)
 Medium: [Ibrahim Yusuf](https://medium.com/@KoredeSec)
-X(Twitter): [@KoredeSec] (https://x.com/KoredeSec)
+X(Twitter): [@KoredeSec](https://x.com/KoredeSec)
 
 
 ---
