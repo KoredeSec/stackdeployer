@@ -295,7 +295,6 @@ EOF
     log "Nginx configured and reloaded"
 }
 
-
 ####################
 # Validation       #
 ####################
@@ -312,6 +311,44 @@ EOF
 }
 
 ####################
+# Cleanup          #
+####################
+remote_cleanup() {
+    echo "============================================="
+    echo "⚠️  CLEANUP MODE ACTIVATED"
+    echo "This will REMOVE the deployed container, remote project directory, and local project clone."
+    echo "============================================="
+
+    safe_read CONFIRM "Are you sure you want to continue? Type 'YES' to confirm: "
+    if [[ "$CONFIRM" != "YES" ]]; then
+        log "Cleanup aborted by user."
+        return 0
+    fi
+
+    log "=== CLEANUP: Removing deployed resources ==="
+    ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "${SSH_USER}@${SSH_HOST}" bash <<EOF
+set -e
+if docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}\$"; then
+    docker rm -f "${CONTAINER_NAME}" || true
+fi
+if [[ "${USE_DOCKER_COMPOSE}" == "1" ]]; then
+    cd "${REMOTE_PROJECT_DIR}" || true
+    docker compose down || true
+fi
+rm -rf "${REMOTE_PROJECT_DIR}"
+EOF
+    log "Remote cleanup completed"
+
+    if [[ -d "$PROJECT_DIR" ]]; then
+        rm -rf "$PROJECT_DIR"
+        log "Local project directory removed"
+    fi
+
+    log "✅ Cleanup complete"
+}
+
+
+####################
 # Main flow        #
 ####################
 main() {
@@ -325,6 +362,13 @@ main() {
     ensure_command curl || die "curl required"
 
     collect_inputs_interactive
+
+    # Run cleanup if requested
+    if [[ "$CLEANUP_MODE" -eq 1 ]]; then
+        remote_cleanup
+        exit 0
+    fi
+
     clone_or_update_repo "$REPO_URL" "$BRANCH" "$PROJECT_DIR"
     check_project_files "$PROJECT_DIR"
     ssh_test_connectivity
