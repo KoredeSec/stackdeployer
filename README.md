@@ -1667,7 +1667,7 @@ SOFTWARE.
 
 **Ibrahim Yusuf (Tory)**
 
-🎓 **President** – NACOSS Osun State University  
+🎓 **President** – NACSS_UNIOSUN (National Association Of CyberSecurity Students, Osun State University)  
 🔐 **Certifications:** Certified in Cybersecurity (ISC² CC) | Microsoft SC-200  
 💼 **Focus:** Cloud Architecture, DevSecOps, Automation, Threat Intel, Cybersecurity  
 
@@ -1680,9 +1680,9 @@ SOFTWARE.
 
 ### Other Projects
 
--  **Adware Detector** 
--  **threat-intel-aggregator** 
--  **azure-sentinel-home-soc** 
+-  **AdwareDetector** [AdwareDetector](https://github.com/KoredeSec/AdwareDetector) 
+-  **threat-intel-aggregator**[threat-intel-aggregator](https://github.com/KoredeSec/threat-intel-aggregator)
+-  **azure-sentinel-home-soc** [azure-sentinel-home-soc](https://github.com/KoredeSec/azure-sentinel-home-soc)
 
 ---
 
