@@ -37,6 +37,18 @@ USE_DOCKER_COMPOSE=0
 ####################
 mkdir -p "$LOGDIR"
 
+# --- Enhanced Error Handling with Trap ---
+cleanup_on_error() {
+    local exit_code=$?
+    if [[ $exit_code -ne 0 ]]; then
+        err "Script failed with exit code $exit_code"
+        err "Check logs at: $LOGFILE"
+    fi
+}
+
+trap cleanup_on_error EXIT ERR
+trap 'err "Script interrupted by user"; exit 130' INT TERM
+
 # --- Logging fixes ---
 exec > >(tee -a "$LOGFILE") 2>&1
 
@@ -92,6 +104,12 @@ validate_ssh_key() {
     if [[ ! -r "$__key" ]]; then
         err "SSH key at $__key is not readable"
         return 1
+    fi
+    # Enhanced: Check key permissions
+    local perms
+    perms=$(stat -c %a "$__key" 2>/dev/null || stat -f %A "$__key" 2>/dev/null || echo "")
+    if [[ -n "$perms" ]] && [[ "$perms" != "600" ]] && [[ "$perms" != "400" ]]; then
+        err "Warning: SSH key permissions should be 600 or 400 (currently: $perms)"
     fi
     return 0
 }
@@ -200,13 +218,27 @@ ssh_run() {
     eval "$(ssh_cmd_base)" "\"${__cmd}\""
 }
 
+# Enhanced SSH connectivity check with retries
 ssh_test_connectivity() {
     log "=== STEP 4: Testing SSH connectivity ==="
-    if ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "${SSH_USER}@${SSH_HOST}" "echo SSH_OK" >/dev/null 2>&1; then
-        log "SSH connectivity OK"
-    else
-        die "SSH connection failed" 43
-    fi
+    local max_retries=3
+    local retry_count=0
+    local wait_time=5
+    
+    while [[ $retry_count -lt $max_retries ]]; do
+        if ssh -i "$SSH_KEY" -o ConnectTimeout=10 -o StrictHostKeyChecking=no "${SSH_USER}@${SSH_HOST}" "echo SSH_OK" >/dev/null 2>&1; then
+            log "✅ SSH connectivity verified successfully"
+            return 0
+        else
+            retry_count=$((retry_count + 1))
+            if [[ $retry_count -lt $max_retries ]]; then
+                log "⚠️  SSH connection attempt $retry_count failed. Retrying in ${wait_time}s..."
+                sleep "$wait_time"
+            fi
+        fi
+    done
+    
+    die "❌ SSH connection failed after $max_retries attempts" 43
 }
 
 rsync_project_to_remote() {
@@ -281,23 +313,82 @@ remote_configure_nginx() {
     log "=== STEP 8: Configuring Nginx Reverse Proxy ==="
     ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "${SSH_USER}@${SSH_HOST}" bash <<EOF
 set -e
-# Backup existing config
-sudo cp /etc/nginx/sites-available/default /etc/nginx/sites-available/default.bak_\$(date +%s) || true
+# Create timestamped backup
+BACKUP_FILE="/etc/nginx/sites-available/default.bak_\$(date +%s)"
+if [[ -f /etc/nginx/sites-available/default ]]; then
+    sudo cp /etc/nginx/sites-available/default "\$BACKUP_FILE"
+    echo "Backup created at: \$BACKUP_FILE"
+fi
+
+# Create comprehensive Nginx configuration
 cat <<'NGINX' | sudo tee /etc/nginx/sites-available/default
 server {
     listen 80;
+    listen [::]:80;
     server_name _;
+    
+    # Security headers
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-XSS-Protection "1; mode=block" always;
+    
+    # Logging
+    access_log /var/log/nginx/${CONTAINER_NAME}_access.log;
+    error_log /var/log/nginx/${CONTAINER_NAME}_error.log;
+    
     location / {
         proxy_pass http://127.0.0.1:${APP_PORT};
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection 'upgrade';
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_cache_bypass \$http_upgrade;
+        
+        # Timeouts
+        proxy_connect_timeout 60s;
+        proxy_send_timeout 60s;
+        proxy_read_timeout 60s;
+    }
+    
+    # Health check endpoint (optional)
+    location /health {
+        access_log off;
+        return 200 "healthy\n";
+        add_header Content-Type text/plain;
     }
 }
+
+# SSL/HTTPS server block (commented out - enable when certificate is ready)
+# server {
+#     listen 443 ssl http2;
+#     listen [::]:443 ssl http2;
+#     server_name _;
+#     
+#     ssl_certificate /etc/ssl/certs/your_cert.pem;
+#     ssl_certificate_key /etc/ssl/private/your_key.pem;
+#     ssl_protocols TLSv1.2 TLSv1.3;
+#     ssl_ciphers HIGH:!aNULL:!MD5;
+#     
+#     location / {
+#         proxy_pass http://127.0.0.1:${APP_PORT};
+#         proxy_set_header Host \$host;
+#         proxy_set_header X-Real-IP \$remote_addr;
+#         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+#         proxy_set_header X-Forwarded-Proto \$scheme;
+#     }
+# }
 NGINX
+
+echo "Testing Nginx configuration..."
 sudo nginx -t
+
+echo "Reloading Nginx..."
 sudo systemctl reload nginx
+
+echo "Nginx configured successfully ✅"
 EOF
     log "Nginx configured and reloaded"
 }
@@ -309,23 +400,97 @@ validate_deployment() {
     log "=== STEP 9: Validating Deployment ==="
     ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "${SSH_USER}@${SSH_HOST}" bash <<EOF
 set -e
-# Check Docker service
-systemctl is-active --quiet docker && echo "Docker service running ✅" || echo "Docker service not active ❌"
 
-# Safe container health check
-if docker info >/dev/null 2>&1; then
-    if docker inspect --format='{{.State.Health.Status}}' ${CONTAINER_NAME} &>/dev/null; then
-        STATUS=\$(docker inspect --format='{{.State.Health.Status}}' ${CONTAINER_NAME})
-        echo "Container ${CONTAINER_NAME} health: \$STATUS"
-    else
-        echo "Container ${CONTAINER_NAME} has no health check defined or does not exist"
-    fi
+echo "================================================"
+echo "🔍 DEPLOYMENT VALIDATION REPORT"
+echo "================================================"
+
+# 1. Check Docker service status
+echo ""
+echo "📦 Docker Service Status:"
+if systemctl is-active --quiet docker; then
+    echo "   ✅ Docker service is running"
+    docker --version || echo "   ⚠️  Could not get Docker version"
 else
-    echo "Cannot connect to Docker daemon. Skipping container health check ❌"
+    echo "   ❌ Docker service is NOT running"
+    exit 1
 fi
 
-# Check Nginx
-systemctl is-active --quiet nginx && echo "Nginx running ✅" || echo "Nginx not active ❌"
+# 2. Check container status
+echo ""
+echo "🐳 Container Status:"
+if docker ps --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}\$"; then
+    echo "   ✅ Container '${CONTAINER_NAME}' is running"
+    
+    # Get container details
+    CONTAINER_STATUS=\$(docker inspect --format='{{.State.Status}}' ${CONTAINER_NAME})
+    echo "   Status: \$CONTAINER_STATUS"
+    
+    # Check health if healthcheck is defined
+    if docker inspect --format='{{.State.Health.Status}}' ${CONTAINER_NAME} &>/dev/null; then
+        HEALTH_STATUS=\$(docker inspect --format='{{.State.Health.Status}}' ${CONTAINER_NAME})
+        echo "   Health: \$HEALTH_STATUS"
+    else
+        echo "   Health: No healthcheck defined"
+    fi
+    
+    # Show container uptime
+    STARTED_AT=\$(docker inspect --format='{{.State.StartedAt}}' ${CONTAINER_NAME})
+    echo "   Started: \$STARTED_AT"
+else
+    echo "   ❌ Container '${CONTAINER_NAME}' is NOT running"
+    echo "   Checking if container exists but stopped..."
+    docker ps -a --filter "name=${CONTAINER_NAME}" --format "table {{.Names}}\t{{.Status}}"
+fi
+
+# 3. Check Nginx service status
+echo ""
+echo "🌐 Nginx Service Status:"
+if systemctl is-active --quiet nginx; then
+    echo "   ✅ Nginx service is running"
+    nginx -v 2>&1 | sed 's/^/   /' || true
+else
+    echo "   ❌ Nginx service is NOT running"
+    exit 1
+fi
+
+# 4. Check Nginx configuration
+echo ""
+echo "⚙️  Nginx Configuration Test:"
+if sudo nginx -t 2>&1 | grep -q "successful"; then
+    echo "   ✅ Nginx configuration is valid"
+else
+    echo "   ❌ Nginx configuration has errors"
+    sudo nginx -t 2>&1 | sed 's/^/   /'
+fi
+
+# 5. Check if app is responding on the port
+echo ""
+echo "🔌 Application Port Check:"
+if netstat -tuln 2>/dev/null | grep -q ":${APP_PORT} " || ss -tuln 2>/dev/null | grep -q ":${APP_PORT} "; then
+    echo "   ✅ Application is listening on port ${APP_PORT}"
+else
+    echo "   ⚠️  Could not verify port ${APP_PORT} (netstat/ss may not be available)"
+fi
+
+# 6. Test local HTTP connection
+echo ""
+echo "🌍 Local HTTP Test:"
+if command -v curl >/dev/null 2>&1; then
+    HTTP_CODE=\$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:${APP_PORT} || echo "000")
+    if [[ "\$HTTP_CODE" =~ ^[23] ]]; then
+        echo "   ✅ Application responding (HTTP \$HTTP_CODE)"
+    else
+        echo "   ⚠️  Unexpected response (HTTP \$HTTP_CODE)"
+    fi
+else
+    echo "   ⚠️  curl not available for HTTP test"
+fi
+
+echo ""
+echo "================================================"
+echo "✅ VALIDATION COMPLETE"
+echo "================================================"
 EOF
     log "Validation complete — try visiting http://${SSH_HOST}"
 }
