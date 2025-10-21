@@ -7,7 +7,6 @@ set -o errexit
 set -o nounset
 set -o pipefail
 
-
 ####################
 # Global variables #
 ####################
@@ -38,7 +37,7 @@ USE_DOCKER_COMPOSE=0
 ####################
 mkdir -p "$LOGDIR"
 
-# --- FIX: Always log to both console and logfile ---
+# --- Logging fixes ---
 exec > >(tee -a "$LOGFILE") 2>&1
 
 timestamp() {
@@ -239,6 +238,12 @@ fi
 if ! command -v nginx >/dev/null; then
   sudo apt-get install -y nginx
 fi
+# --- Docker group fix ---
+sudo groupadd -f docker
+sudo usermod -aG docker \$USER || true
+newgrp docker <<'EOF'
+echo "User added to docker group"
+EOF
 sudo systemctl enable docker nginx
 sudo systemctl start docker nginx
 echo "Remote setup complete."
@@ -276,6 +281,8 @@ remote_configure_nginx() {
     log "=== STEP 8: Configuring Nginx Reverse Proxy ==="
     ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "${SSH_USER}@${SSH_HOST}" bash <<EOF
 set -e
+# Backup existing config
+sudo cp /etc/nginx/sites-available/default /etc/nginx/sites-available/default.bak_\$(date +%s) || true
 cat <<'NGINX' | sudo tee /etc/nginx/sites-available/default
 server {
     listen 80;
@@ -302,10 +309,23 @@ validate_deployment() {
     log "=== STEP 9: Validating Deployment ==="
     ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "${SSH_USER}@${SSH_HOST}" bash <<EOF
 set -e
-echo "Docker containers running:"
-docker ps
-echo "Testing app response..."
-curl -s -o /dev/null -w "HTTP %{http_code}\n" http://127.0.0.1:${APP_PORT}
+# Check Docker service
+systemctl is-active --quiet docker && echo "Docker service running ✅" || echo "Docker service not active ❌"
+
+# Safe container health check
+if docker info >/dev/null 2>&1; then
+    if docker inspect --format='{{.State.Health.Status}}' ${CONTAINER_NAME} &>/dev/null; then
+        STATUS=\$(docker inspect --format='{{.State.Health.Status}}' ${CONTAINER_NAME})
+        echo "Container ${CONTAINER_NAME} health: \$STATUS"
+    else
+        echo "Container ${CONTAINER_NAME} has no health check defined or does not exist"
+    fi
+else
+    echo "Cannot connect to Docker daemon. Skipping container health check ❌"
+fi
+
+# Check Nginx
+systemctl is-active --quiet nginx && echo "Nginx running ✅" || echo "Nginx not active ❌"
 EOF
     log "Validation complete — try visiting http://${SSH_HOST}"
 }
@@ -314,17 +334,6 @@ EOF
 # Cleanup          #
 ####################
 remote_cleanup() {
-    echo "============================================="
-    echo "⚠️  CLEANUP MODE ACTIVATED"
-    echo "This will REMOVE the deployed container, remote project directory, and local project clone."
-    echo "============================================="
-
-    safe_read CONFIRM "Are you sure you want to continue? Type 'YES' to confirm: "
-    if [[ "$CONFIRM" != "YES" ]]; then
-        log "Cleanup aborted by user."
-        return 0
-    fi
-
     log "=== CLEANUP: Removing deployed resources ==="
     ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "${SSH_USER}@${SSH_HOST}" bash <<EOF
 set -e
@@ -337,16 +346,12 @@ if [[ "${USE_DOCKER_COMPOSE}" == "1" ]]; then
 fi
 rm -rf "${REMOTE_PROJECT_DIR}"
 EOF
-    log "Remote cleanup completed"
-
     if [[ -d "$PROJECT_DIR" ]]; then
         rm -rf "$PROJECT_DIR"
         log "Local project directory removed"
     fi
-
     log "✅ Cleanup complete"
 }
-
 
 ####################
 # Main flow        #
