@@ -1,0 +1,5 @@
+.env
+logs/
+*.log
+*.tar.gz
+node_modules/
