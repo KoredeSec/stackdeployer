@@ -31,8 +31,9 @@ StackDeployer automates the full cycle of deploying a containerized application 
 It follows a simple yet production-grade design pattern based on modular shell functions and environment-based configuration.
 
 
-### 🔹 Core Workflow
+### 🧭 Core Workflow
 
+```text
 +-------------------------+                +---------------------------+
 |      Local Machine      |                |      Remote Server        |
 | (DevOps Engineer Laptop)|                | (AWS EC2 Ubuntu Instance) |
@@ -49,6 +50,7 @@ It follows a simple yet production-grade design pattern based on modular shell f
                      +--------------------------- HTTP/HTTPS ------------------>
 
 
+```
 ---
 
 ## ⚙️ Prerequisites
