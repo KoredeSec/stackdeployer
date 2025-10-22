@@ -1667,7 +1667,7 @@ SOFTWARE.
 
 **Ibrahim Yusuf (Tory)**
 
-🎓 **President** – NACSS_UNIOSUN (National Association Of CyberSecurity Students, Osun State University)  
+🎓 **President** – NACSS_UNIOSUN (Nigeria Association Of CyberSecurity Students, Osun State University)  
 🔐 **Certifications:** Certified in Cybersecurity (ISC² CC) | Microsoft SC-200  
 💼 **Focus:** Cloud Architecture, DevSecOps, Automation, Threat Intel, Cybersecurity  
 
